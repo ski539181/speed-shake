@@ -3,76 +3,72 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import av
 import mediapipe as mp
 import cv2
+import numpy as np
 
-# ตั้งค่าหน้าเว็บให้เบาที่สุด
 st.set_page_config(page_title="SPEED Shake", layout="centered")
 st.title("🥤 SPEED Shake Campaign")
+st.subheader("กำปั้นแล้วเขย่ารัวๆ เพื่อสะสมคะแนน!")
 
-# โหลด MediaPipe ไว้ข้างนอกเพื่อประหยัด RAM
 mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
 
 class ShakeProcessor(VideoProcessorBase):
     def __init__(self):
         self.hands = mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
-            model_complexity=0, # 0 = เร็วที่สุด (เหมาะกับมือถือและแก้ดีเลย์)
+            model_complexity=0,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
         self.count = 0
-        self.stage = "down"
-        self.frame_count = 0 
+        self.prev_y = 0
+        self.direction = 0 # 1 คือขึ้น, -1 คือลง
+        self.min_movement = 0.015 # ระยะขยับขั้นต่ำ (ปรับให้เซนซิทีฟขึ้นได้ที่นี่)
 
     def recv(self, frame):
-        self.frame_count += 1
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
+        
+        results = self.hands.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        # --- แก้ดีเลย์: ประมวลผล AI 1 เฟรม เว้น 1 เฟรม ---
-        if self.frame_count % 2 == 0:
-            results = self.hands.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    # ใช้จุดที่ 9 (กลางฝ่ามือ) จะนิ่งกว่าข้อมือในระยะใกล้
-                    hand_center_y = hand_landmarks.landmark[9].y
-                    
-                    # ปรับจังหวะนับให้กว้างขึ้นตามระยะมือในรูปเดิมของคุณ
-                    if hand_center_y < 0.48: 
-                        self.stage = "up"
-                    if hand_center_y > 0.52 and self.stage == "up":
-                        self.stage = "down"
-                        self.count += 1
-                    
-                    # วาดเส้นเฉพาะตอนประมวลผลเพื่อลดการใช้ CPU
-                    mp_drawing.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # ใช้จุดข้อมือ (0) เป็นหลักในการตรวจจับการสั่น
+                current_y = hand_landmarks.landmark[0].y
+                
+                # คำนวณส่วนต่างการเคลื่อนที่
+                movement = current_y - self.prev_y
+                
+                # Logic: ถ้าขยับเกินระยะที่กำหนด และเปลี่ยนทิศทาง = นับคะแนน
+                if abs(movement) > self.min_movement:
+                    if movement > 0 and self.direction != -1: # กำลังลง
+                        self.direction = -1
+                    elif movement < 0 and self.direction != 1: # กำลังขึ้น
+                        self.direction = 1
+                        self.count += 1 # นับ 1 เมื่อขยับขึ้นครบ 1 จังหวะ
+                
+                self.prev_y = current_y
+                
+                # วาดเส้นจุดเชื่อมต่อให้เห็นการกำมือ
+                mp.solutions.drawing_utils.draw_landmarks(
+                    img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# ปรับปรุงการเชื่อมต่อ WebRTC ให้ลื่นขึ้น
 ctx = webrtc_streamer(
-    key="speed-shake-optimized",
+    key="speed-shake-micro",
     video_processor_factory=ShakeProcessor,
-    # iceServers ช่วยให้การส่งข้อมูลข้ามเครือข่ายมือถือไม่ดีเลย์
     rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"], "urls": ["stun:stun1.l.google.com:19302"]}]
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
     },
     media_stream_constraints={
-        "video": {
-            "width": {"ideal": 480}, # ลดความละเอียดภาพลงเพื่อให้ประมวลผลไวขึ้น
-            "height": {"ideal": 640},
-            "frameRate": {"ideal": 20}
-        },
+        "video": {"width": 480, "height": 640, "frameRate": 30}, # เพิ่ม FrameRate ให้ลื่นเพื่อจับการเขย่า
         "audio": False
     },
-    async_processing=True, # สำคัญ: แยกการวาดภาพกับการประมวลผลออกจากกัน
+    async_processing=True,
 )
 
 if ctx.video_processor:
-    # ใช้พื้นที่ HTML เพื่อแสดงคะแนนให้ไวที่สุด
-    score_place = st.empty()
-    score_place.markdown(f"<h1 style='text-align: center; color: red; font-size: 100px;'>{ctx.video_processor.count}</h1>", unsafe_allow_html=True)
-    
+    st.markdown(f"<h1 style='text-align: center; color: #FF4B4B; font-size: 120px;'>{ctx.video_processor.count}</h1>", unsafe_allow_html=True)
     if st.button("Reset Score"):
         ctx.video_processor.count = 0
