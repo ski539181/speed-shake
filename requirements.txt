@@ -1,3 +1,6 @@
 streamlit
 streamlit-webrtc
 mediapipe
+av
+tornado
+opencv-python-headless
