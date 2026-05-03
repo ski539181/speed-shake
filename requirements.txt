@@ -4,5 +4,3 @@ mediapipe==0.10.11
 opencv-python-headless
 av
 tornado
-requests
-pandas
